@@ -2,3 +2,4 @@ flask
 gunicorn
 wikipedia
 duckduckgo-search
+pyspellchecker
