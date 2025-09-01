@@ -32,6 +32,43 @@ from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 import os
 import re
+from typing import Optional, Tuple
+
+
+# Helper function to extract a population estimate from DuckDuckGo search snippets.
+# It scans the snippet text for patterns like "600 million" or "1.2 billion".
+def _extract_population_from_snippets(subject: str, results: list) -> Optional[str]:
+    """Return a concise population estimate extracted from search result snippets.
+
+    Args:
+        subject: The subject of the population query (e.g. "cat", "dogs").
+        results: A list of search results returned by DDGS, each with keys
+            "title", "href" and "body".
+
+    Returns:
+        A formatted string describing the estimated population, or None if no
+        suitable estimate is found.
+    """
+    # Regular expression to match numbers followed by million/billion.
+    number_pattern = re.compile(r"\b([\d,]+(?:\.\d+)?\s*(?:million|billion))", re.IGNORECASE)
+    # Iterate over results, prioritising bodies that mention the subject.
+    for res in results:
+        snippet = res.get("body", "") or ""
+        # Skip if snippet does not mention the subject at all.
+        if subject.lower() not in snippet.lower():
+            continue
+        # Find all matches of population numbers.
+        matches = number_pattern.findall(snippet)
+        if matches:
+            # Choose the longest match (likely the largest number/range).
+            # e.g., ["600 million", "1 billion"] -> choose the last.
+            estimate = matches[-1]
+            # Clean up the estimate (strip whitespace)
+            estimate = estimate.strip()
+            # Format a simple answer.
+            return f"The estimated {subject} population is around {estimate}."
+    # If no match found, return None
+    return None
 
 try:
     # The wikipedia library provides convenient access to Wikipedia summaries.
@@ -182,8 +219,31 @@ def search():
                 # If Wikipedia search fails, ignore and proceed without answer
                 answer = None
 
+    # If we already found an answer from Wikipedia, include it.
     if answer:
         response["answer"] = answer
+    else:
+        # Additional heuristic: handle general population queries even when not
+        # prefixed by "how many" or "population of". Correct common misspellings.
+        # Work on a lowercased version of the query for analysis. Avoid using
+        # lower_query from the Wikipedia block which may not exist if wikipedia
+        # is None.
+        lower_query_corrected = query.lower().strip()
+        # Fix typical misspellings of "population"
+        for misspelling in ["poplutation", "popluation", "popultation", "populaton"]:
+            lower_query_corrected = lower_query_corrected.replace(misspelling, "population")
+        if "population" in lower_query_corrected:
+            # Extract the subject by removing leading population phrases.
+            # E.g., "cat population" -> "cat", "population of cats" -> "cats".
+            subject = lower_query_corrected
+            for prefix in ["population of", "population for", "population in", "population"]:
+                if subject.startswith(prefix):
+                    subject = subject[len(prefix):].strip()
+            # If we have a subject, attempt to extract numbers from search snippets.
+            if subject:
+                pop_answer = _extract_population_from_snippets(subject, results)
+                if pop_answer:
+                    response["answer"] = pop_answer
 
     return jsonify(response)
 
