@@ -31,6 +31,16 @@ results or an error message if no results are found.
 from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 import os
+import re
+
+try:
+    # The wikipedia library provides convenient access to Wikipedia summaries.
+    import wikipedia  # type: ignore
+except ImportError:
+    # If wikipedia is not installed, the API will still function but no answers
+    # will be generated.  In production you should add 'wikipedia' to your
+    # requirements.txt to enable richer responses.
+    wikipedia = None  # type: ignore
 
 app = Flask(__name__)
 
@@ -86,7 +96,13 @@ def search():
     except ValueError:
         return jsonify({"error": "max_results must be a positive integer"}), 400
 
-    region = request.args.get("region", "us-en")
+    # Determine the region based on the query.  By default, use English (us-en).
+    region = request.args.get("region")
+    if not region:
+        # If the query contains non‑ASCII characters, fall back to a global region
+        # to allow other languages.  Otherwise default to US English.
+        region = "wt-wt" if any(ord(ch) > 127 for ch in query) else "us-en"
+
     safesearch = request.args.get("safesearch", "moderate").lower()
     timelimit = request.args.get("timelimit")  # None means no filter
 
@@ -106,19 +122,70 @@ def search():
         # Return a generic error message; in production you might log ex
         return jsonify({"error": f"Search failed: {ex}"}), 500
 
-    if not results:
-        return jsonify({
-            "query": query,
-            "count": 0,
-            "results": [],
-            "message": "No results found for the given query."
-        }), 200
-
-    return jsonify({
+    # Build the base response
+    response = {
         "query": query,
         "count": len(results),
-        "results": results
-    })
+        "results": results or [],
+    }
+
+    if not results:
+        response["message"] = "No results found for the given query."
+        return jsonify(response), 200
+
+    # Attempt to generate a concise answer for common question patterns when
+    # wikipedia is available.  This is best effort and will be skipped if
+    # wikipedia is not installed or no summary is found.
+    answer = None
+    if wikipedia is not None:
+        # Normalize the query for analysis
+        lower_query = query.lower().strip()
+        # If the query asks "what is", "who is", "define", etc.,
+        # we attempt to fetch a short summary from Wikipedia.
+        patterns = [
+            r"^(what is|who is|define|meaning of)\s+(.+)",
+            r"^(.+)\s+definition$",
+        ]
+        match = None
+        for pattern in patterns:
+            m = re.match(pattern, lower_query)
+            if m:
+                # The topic is in the last captured group
+                topic = m.groups()[-1]
+                match = topic
+                break
+
+        # Handle questions starting with "how many" or "population of"
+        if not match:
+            if lower_query.startswith("how many") or lower_query.startswith("population of"):
+                # Extract the subject for population queries
+                # e.g., "how many cats exist" -> "cats"
+                subject = lower_query
+                # Remove leading phrases
+                for prefix in ["how many", "population of", "number of", "count of"]:
+                    if subject.startswith(prefix):
+                        subject = subject[len(prefix):].strip()
+                # Remove common trailing words
+                subject = re.sub(r"( exist| are there| are)", "", subject).strip()
+                match = subject + " population"
+
+        if match:
+            try:
+                # Use Wikipedia search to find the best page
+                search_results = wikipedia.search(match)
+                if search_results:
+                    page_title = search_results[0]
+                    # Fetch a concise summary (first sentence)
+                    summary = wikipedia.summary(page_title, sentences=1)
+                    answer = summary.strip()
+            except Exception:
+                # If Wikipedia search fails, ignore and proceed without answer
+                answer = None
+
+    if answer:
+        response["answer"] = answer
+
+    return jsonify(response)
 
 
 def run():
