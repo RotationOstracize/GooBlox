@@ -67,6 +67,52 @@ def _extract_population_from_snippets(subject: str, results: list) -> Optional[s
     # If no match found, return None
     return None
 
+
+def _filter_results_by_keywords(query: str, results: list) -> list:
+    """
+    Filter out search results that clearly don't match the user query.
+
+    This helper removes results from domains known to be off‑topic (e.g. StackOverflow)
+    and ensures that the result's title or snippet contains all of the words
+    from the query.  If filtering would remove every result, the original list
+    is returned instead.
+
+    :param query: The user query as entered (after spell‑checking).
+    :param results: A list of result dictionaries with ``title``, ``href`` and ``body`` keys.
+    :return: A filtered list of results.
+    """
+    import re as _re
+    # Domains unlikely to be relevant for general knowledge queries.
+    blocked_domains = {
+        "stackoverflow.com",
+        "serverfault.com",
+        "superuser.com",
+        "stackexchange.com",
+        "github.com",
+    }
+    # Normalize the query: lowercase and remove punctuation.
+    cleaned_query = _re.sub(r"[^a-z0-9\s]", " ", query.lower())
+    keywords = [k for k in cleaned_query.split() if k]
+    filtered = []
+    for res in results:
+        href = res.get("href", "") or ""
+        domain = ""
+        try:
+            domain = href.split("//", 1)[-1].split("/", 1)[0].lower()
+        except Exception:
+            domain = ""
+        # Skip blocked domains
+        if any(domain.endswith(bd) for bd in blocked_domains):
+            continue
+        title = (res.get("title", "") or "").lower()
+        snippet = (res.get("body", "") or "").lower()
+        combined = title + " " + snippet
+        combined = _re.sub(r"[^a-z0-9\s]", " ", combined)
+        if all(k in combined for k in keywords):
+            filtered.append(res)
+    # If no results remain, return the original list to avoid empty responses
+    return filtered or results
+
 try:
     # The wikipedia library provides convenient access to Wikipedia summaries.
     import wikipedia  # type: ignore
