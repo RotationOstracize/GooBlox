@@ -167,17 +167,21 @@ def search():
     query = effective_query
 
     # Parse optional parameters with sensible defaults
-    # If the query is a population query, increase the number of results
-    # fetched to improve the chances of finding a numerical estimate.
-    if "population" in query.lower():
-        max_results = max(max_results, 20)
-
+    # Start with the user‑supplied max_results or default to 5
     try:
         max_results = int(request.args.get("max_results", 5))
         if max_results <= 0:
             raise ValueError
     except ValueError:
         return jsonify({"error": "max_results must be a positive integer"}), 400
+
+    # If the query is a population query, increase the number of results
+    # fetched to improve the chances of finding a numerical estimate.  This
+    # adjustment happens after reading the user‑supplied value so that the
+    # variable exists when we refer to it.  We only raise the limit and
+    # never reduce it below the user’s request.
+    if "population" in query.lower():
+        max_results = max(max_results, 20)
 
     # Determine the region based on the query.  By default, use English (us-en).
     region = request.args.get("region")
