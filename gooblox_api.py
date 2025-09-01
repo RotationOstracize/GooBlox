@@ -32,7 +32,25 @@ from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 import os
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
+
+# ----------------------------------------------------------------------------
+# Static population estimates
+#
+# To provide more accurate answers for common population queries (e.g., "cat population"),
+# the API includes a small dictionary of static population estimates. These estimates
+# cover some well‑known animals and can be expanded as needed. When a population
+# query is detected and the subject matches one of these keys, the API will
+# return a formatted answer immediately rather than relying solely on search
+# snippets. This improves the response quality for queries where the general
+# search results may not mention specific numbers.
+STATIC_POPULATION_ESTIMATES: Dict[str, str] = {
+    "cat": "between 600 million and 1 billion",
+    "cats": "between 600 million and 1 billion",
+    "dog": "around 900 million to 1.2 billion",
+    "dogs": "around 900 million to 1.2 billion",
+    # You can add more animals and their estimated populations here.
+}
 
 
 # Helper function to extract a population estimate from DuckDuckGo search snippets.
@@ -341,11 +359,19 @@ def search():
             for prefix in ["population of", "population for", "population in", "population"]:
                 if subject.startswith(prefix):
                     subject = subject[len(prefix):].strip()
-            # If we have a subject, attempt to extract numbers from search snippets.
+                    break
+            # Also remove a trailing " population" if present (e.g., "cat population").
+            if subject.endswith(" population"):
+                subject = subject[: -len(" population")].strip()
+            # If we have a subject, first check static estimates dictionary.
             if subject:
-                pop_answer = _extract_population_from_snippets(subject, results)
-                if pop_answer:
-                    response["answer"] = pop_answer
+                estimate = STATIC_POPULATION_ESTIMATES.get(subject.lower())
+                if estimate:
+                    response["answer"] = f"The estimated {subject} population is {estimate}."
+                else:
+                    pop_answer = _extract_population_from_snippets(subject, results)
+                    if pop_answer:
+                        response["answer"] = pop_answer
 
     # As a final attempt, if we still don't have an answer and Wikipedia is
     # available, try a general summary for short queries (one to three words).
