@@ -32,7 +32,7 @@ from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 import os
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 
 # Helper function to extract a population estimate from DuckDuckGo search snippets.
@@ -51,21 +51,18 @@ def _extract_population_from_snippets(subject: str, results: list) -> Optional[s
     """
     # Regular expression to match numbers followed by million/billion.
     number_pattern = re.compile(r"\b([\d,]+(?:\.\d+)?\s*(?:million|billion))", re.IGNORECASE)
-    # Iterate over results, prioritising bodies that mention the subject.
+    # Iterate over results, considering both the body and the title for number patterns.
     for res in results:
-        snippet = res.get("body", "") or ""
-        # Skip if snippet does not mention the subject at all.
+        snippet = (res.get("body", "") or "") + " " + (res.get("title", "") or "")
+        # Skip if the snippet does not mention the subject at all; this reduces
+        # false positives from unrelated pages.  Use lowercase comparison.
         if subject.lower() not in snippet.lower():
             continue
         # Find all matches of population numbers.
         matches = number_pattern.findall(snippet)
         if matches:
-            # Choose the longest match (likely the largest number/range).
-            # e.g., ["600 million", "1 billion"] -> choose the last.
-            estimate = matches[-1]
-            # Clean up the estimate (strip whitespace)
-            estimate = estimate.strip()
-            # Format a simple answer.
+            # Choose the last match (often the largest number/range).
+            estimate = matches[-1].strip()
             return f"The estimated {subject} population is around {estimate}."
     # If no match found, return None
     return None
@@ -78,6 +75,21 @@ except ImportError:
     # will be generated.  In production you should add 'wikipedia' to your
     # requirements.txt to enable richer responses.
     wikipedia = None  # type: ignore
+
+# ---------------------------------------------------------------------------
+# Optional spelling correction
+#
+# To approximate Google's "Did you mean" feature, we attempt to correct
+# misspelled words in the query using the pyspellchecker library.  If the
+# library isn't installed, the API will continue to function without
+# spell‑checking.  Only ASCII queries are spell‑checked to avoid corrupting
+# queries in other languages or scripts.
+try:
+    from spellchecker import SpellChecker  # type: ignore
+    _spellchecker = SpellChecker()
+except Exception:
+    # Spell checking is optional; gracefully handle missing dependency.
+    _spellchecker = None
 
 app = Flask(__name__)
 
@@ -125,7 +137,41 @@ def search():
     if not query:
         return jsonify({"error": "Missing query parameter 'q'"}), 400
 
+    # Preserve the original query for the response before any transformation.
+    original_query = query
+    # Attempt to correct obvious spelling mistakes using pyspellchecker.
+    # Only apply to ASCII queries to avoid corrupting queries in non‑Latin scripts.
+    effective_query = query
+    spellchecked_used = False
+    if _spellchecker is not None and all(ord(ch) < 128 for ch in original_query):
+        # Use a simple regex to extract words and numbers; this avoids splitting
+        # on punctuation such as hyphens or apostrophes in contractions.
+        words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+", original_query)
+        corrected_tokens = []
+        for token in words:
+            # Only spell‑check alphabetic tokens; leave numbers unchanged.
+            if token.isalpha():
+                # Lowercase for correction; preserve initial capitalisation.
+                corrected = _spellchecker.correction(token.lower())
+                if token[0].isupper():
+                    corrected = corrected.title()
+                corrected_tokens.append(corrected)
+            else:
+                corrected_tokens.append(token)
+        corrected_query = " ".join(corrected_tokens)
+        # If the corrected query differs (case‑insensitive), use it.
+        if corrected_query.lower() != original_query.lower():
+            effective_query = corrected_query
+            spellchecked_used = True
+    # Use the possibly corrected query for all downstream processing
+    query = effective_query
+
     # Parse optional parameters with sensible defaults
+    # If the query is a population query, increase the number of results
+    # fetched to improve the chances of finding a numerical estimate.
+    if "population" in query.lower():
+        max_results = max(max_results, 20)
+
     try:
         max_results = int(request.args.get("max_results", 5))
         if max_results <= 0:
@@ -159,12 +205,18 @@ def search():
         # Return a generic error message; in production you might log ex
         return jsonify({"error": f"Search failed: {ex}"}), 500
 
-    # Build the base response
+    # Post‑process the results to remove obviously irrelevant hits.
+    results = _filter_results_by_keywords(query, results)
+
+    # Build the base response.  Always echo the original query the user sent.
     response = {
-        "query": query,
+        "query": original_query,
         "count": len(results),
         "results": results or [],
     }
+    # Include the corrected query if spell‑checking altered it.
+    if spellchecked_used:
+        response["spellchecked_query"] = query
 
     if not results:
         response["message"] = "No results found for the given query."
@@ -244,6 +296,22 @@ def search():
                 pop_answer = _extract_population_from_snippets(subject, results)
                 if pop_answer:
                     response["answer"] = pop_answer
+
+    # As a final attempt, if we still don't have an answer and Wikipedia is
+    # available, try a general summary for short queries (one to three words).
+    if wikipedia is not None and "answer" not in response:
+        # Only attempt general summary for simple queries (e.g., "hello", "cat")
+        tokens = query.lower().split()
+        if 1 <= len(tokens) <= 3:
+            try:
+                search_results = wikipedia.search(query)
+                if search_results:
+                    page_title = search_results[0]
+                    summary = wikipedia.summary(page_title, sentences=1)
+                    if summary:
+                        response["answer"] = summary.strip()
+            except Exception:
+                pass
 
     return jsonify(response)
 
